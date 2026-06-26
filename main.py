@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 from datetime import datetime
 import os
 
@@ -18,7 +19,8 @@ def record_over_webcam(channel: int) -> None:
 
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         fps = fps if fps > 0 else 30
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) * 2
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         out = cv2.VideoWriter(
@@ -40,8 +42,14 @@ def stream_video(cap: cv2.VideoCapture, out: cv2.VideoWriter):
             if not ret:
                 break
                 
-            out.write(frame)
-            cv2.imshow("Webcam - Press 'q' key to quit.", frame)
+            red_frame = frame.copy()
+            red_frame[:, :, 0] = 0
+            red_frame[:, :, 1] = 0
+            
+            dashboard = cv2.hconcat([frame, red_frame])
+                
+            out.write(dashboard)
+            cv2.imshow("Day 3 Dashboard - Original vs Red Channel", dashboard)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
