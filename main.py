@@ -2,6 +2,9 @@ import cv2
 import numpy as np
 from datetime import datetime
 import os
+from ultralytics import YOLO
+
+model = YOLO("yolov8n.pt")
 
 recordings_dir = os.path.join('recordings')
 if not os.path.exists(recordings_dir):
@@ -42,14 +45,19 @@ def stream_video(cap: cv2.VideoCapture, out: cv2.VideoWriter):
             if not ret:
                 break
                 
-            red_frame = frame.copy()
-            red_frame[:, :, 0] = 0
-            red_frame[:, :, 1] = 0
+            results = model.predict(source=frame, verbose=False)
+            ai_frame = results[0].plot()
             
-            dashboard = cv2.hconcat([frame, red_frame])
+            for box in results[0].boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                conf = box.conf[0].item()
+                cls = int(box.cls[0].item())
+                print(f"Class ID: {cls} | Conf: {conf:.2f} | BBox: ({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f})")
+            
+            dashboard = cv2.hconcat([frame, ai_frame])
                 
             out.write(dashboard)
-            cv2.imshow("Day 3 Dashboard - Original vs Red Channel", dashboard)
+            cv2.imshow("Day 4 Dashboard - Live AI Object Detection", dashboard)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -67,4 +75,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+ 
