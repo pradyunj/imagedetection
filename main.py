@@ -1,7 +1,8 @@
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 import cv2
-import numpy as np
-from datetime import datetime
 import os
+from datetime import datetime
 from ultralytics import YOLO
 
 model = YOLO("yolov8n.pt")
@@ -13,7 +14,6 @@ if not os.path.exists(recordings_dir):
 def record_over_webcam(channel: int) -> None:
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
         cap = cv2.VideoCapture(channel, cv2.CAP_AVFOUNDATION)
 
         if not cap.isOpened():
@@ -22,8 +22,7 @@ def record_over_webcam(channel: int) -> None:
 
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         fps = fps if fps > 0 else 30
-        
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) * 2
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         out = cv2.VideoWriter(
@@ -46,18 +45,20 @@ def stream_video(cap: cv2.VideoCapture, out: cv2.VideoWriter):
                 break
                 
             results = model.predict(source=frame, verbose=False)
-            ai_frame = results[0].plot()
             
             for box in results[0].boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 conf = box.conf[0].item()
                 cls = int(box.cls[0].item())
-                print(f"Class ID: {cls} | Conf: {conf:.2f} | BBox: ({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f})")
-            
-            dashboard = cv2.hconcat([frame, ai_frame])
+                name = model.names[cls]
                 
-            out.write(dashboard)
-            cv2.imshow("Day 4 Dashboard - Live AI Object Detection", dashboard)
+                if cls == 67 and conf > 0.60:
+                    print(f"[ALERT] TARGET ACQUIRED! ({name} at {conf:.2f})")
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+                    cv2.putText(frame, f"{name} {conf:.2f}", (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            
+            out.write(frame)
+            cv2.imshow("Day 6 - Sniper Focus", frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -75,4 +76,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
