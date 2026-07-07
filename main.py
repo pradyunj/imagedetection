@@ -38,6 +38,7 @@ def record_over_webcam(channel: int) -> None:
         print(f"Error in record_over_webcam: {e}")
 
 def stream_video(cap: cv2.VideoCapture, out: cv2.VideoWriter):
+    trail = []
     try:
         while True:
             ret, frame = cap.read()
@@ -52,13 +53,23 @@ def stream_video(cap: cv2.VideoCapture, out: cv2.VideoWriter):
                 cls = int(box.cls[0].item())
                 name = model.names[cls]
                 
-                if cls == 67 and conf > 0.60:
-                    print(f"[ALERT] TARGET ACQUIRED! ({name} at {conf:.2f})")
+                if cls == 67 and conf > 0.50:
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+                    
+                    trail.append((cx, cy))
+                    if len(trail) > 30:
+                        trail.pop(0)
+                        
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
                     cv2.putText(frame, f"{name} {conf:.2f}", (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+                    cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+
+            for i in range(1, len(trail)):
+                cv2.line(frame, trail[i-1], trail[i], (255, 0, 0), 2)
             
             out.write(frame)
-            cv2.imshow("Day 6 - Sniper Focus", frame)
+            cv2.imshow("Day 7 - Motion Tracking", frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -76,3 +87,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
