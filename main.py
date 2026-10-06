@@ -20,7 +20,7 @@ from datetime import datetime
 from ultralytics import YOLO
 
 def create_tracker():
-    """KCF is only in opencv-contrib, so fall back to MIL (included in regular OpenCV)."""
+    """KCF is only in opencv-contrib, so fall back to MIL (included in standard OpenCV)."""
     if hasattr(cv2, "TrackerKCF_create"):
         return cv2.TrackerKCF_create()
     if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
@@ -28,7 +28,7 @@ def create_tracker():
     return cv2.TrackerMIL_create()
 
 class RaptorDefenseSystem:
-    def __init__(self, video_source="eagle_flying.webm"):
+    def __init__(self, video_source="eagle_flying.mp4"):
         # Auto-detect video source: fallback to webcam index 0 if video asset not present
         if isinstance(video_source, str) and not os.path.exists(video_source):
             print(f"[SYSTEM] Notice: Video asset '{video_source}' not found. Defaulting to live webcam (Index 0).")
@@ -42,7 +42,7 @@ class RaptorDefenseSystem:
         self.model = YOLO(model_weights)
 
         # Threading queue & output storage
-        self.frame_queue = queue.Queue(maxsize=5)
+        self.frame_queue = queue.Queue(maxsize=10)
         self.running = True
         self.recordings_dir = os.path.join('recordings')
         os.makedirs(self.recordings_dir, exist_ok=True)
@@ -52,6 +52,11 @@ class RaptorDefenseSystem:
         self.zone_pts = np.array([[200, 100], [440, 100], [440, 380], [200, 380]], np.int32).reshape((-1, 1, 2))
         self.rect_zone = (200, 100, 240, 280)
 
+        # State filters for stability
+        self.smooth_x = None
+        self.smooth_y = None
+        self.brake_latch_until = 0.0  # Hysteresis safety hold timer
+
     def read_frames(self, cap):
         """Producer Thread: Continuously grabs hardware/video frames."""
         is_webcam = isinstance(self.video_source, int)
@@ -60,11 +65,11 @@ class RaptorDefenseSystem:
             if not ret:
                 break
             if is_webcam:
-                # Webcam: skip frames if we're behind so the feed stays live
+                # Webcam: keep feed live by discarding backlogged frames
                 if not self.frame_queue.full():
                     self.frame_queue.put(frame)
             else:
-                # Video file: wait for room so we don't skip any frames
+                # Video file: block until consumer is ready so no frames are lost
                 while self.running:
                     try:
                         self.frame_queue.put(frame, timeout=0.2)
@@ -81,28 +86,41 @@ class RaptorDefenseSystem:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         csv_writer.writerow([current_time, name, cx, cy])
 
-    def check_collision(self, cx, cy, trail, frame):
-        """Spatial Intersection & Predictive Trajectory Vector Collision Engine."""
-        alert = False
-        # Direct spatial breach check
-        if 200 <= cx <= 440 and 100 <= cy <= 380:
-            alert = True
+    def check_collision(self, scx, scy, trail, frame):
+        """Spatial Intersection & Predictive Velocity Vector Collision Engine."""
+        instant_alert = False
 
-        # Day 17: Velocity Vector & Forward Projection (predict 30 frames ahead)
-        if len(trail) >= 5:
-            px, py = trail[-5]
-            vx = cx - px
-            vy = cy - py
-            fx = int(cx + (vx * 6))
-            fy = int(cy + (vy * 6))
+        # 1. Direct spatial breach check (is the bird currently inside the rotor box?)
+        if 200 <= scx <= 440 and 100 <= scy <= 380:
+            instant_alert = True
 
-            predictive_hit, _, _ = cv2.clipLine(self.rect_zone, (cx, cy), (fx, fy))
+        # 2. Predictive Trajectory Vector (using smoothed history over past 8 frames)
+        if len(trail) >= 8:
+            # Measure velocity over a stable baseline to eliminate frame jitter
+            dx = trail[-1][0] - trail[-8][0]
+            dy = trail[-1][1] - trail[-8][1]
+            vx = dx / 7.0
+            vy = dy / 7.0
+
+            # Project path 18 frames forward (~0.6 seconds in advance)
+            fx = int(scx + vx * 18)
+            fy = int(scy + vy * 18)
+
+            predictive_hit, _, _ = cv2.clipLine(self.rect_zone, (scx, scy), (fx, fy))
             if predictive_hit:
-                alert = True
-                cv2.line(frame, (cx, cy), (fx, fy), (0, 165, 255), 3)  # Orange warning vector
+                instant_alert = True
+                cv2.line(frame, (scx, scy), (fx, fy), (0, 140, 255), 3)  # Orange warning vector
+                cv2.circle(frame, (fx, fy), 4, (0, 140, 255), -1)
             else:
-                cv2.line(frame, (cx, cy), (fx, fy), (0, 255, 0), 2)    # Green safe vector
-        return alert, frame
+                cv2.line(frame, (scx, scy), (fx, fy), (0, 255, 0), 2)    # Green safe vector
+
+        # 3. Industrial Latch / Hysteresis: Hold brake engaged for at least 1.8 seconds
+        # This prevents mechanical brake chatter (rapid on/off flickering)
+        if instant_alert:
+            self.brake_latch_until = time.time() + 1.8
+
+        alert_active = (time.time() < self.brake_latch_until)
+        return alert_active, frame
 
     def render_dashboard(self, frame, fps_val, cx, cy, conf, tracking_mode, alert_triggered):
         """Day 20: Industrial Mission Control Command Center HUD."""
@@ -136,9 +154,9 @@ class RaptorDefenseSystem:
         btn_radius = 48
 
         if alert_triggered:
-            flash_on = (int(time.time() * 6) % 2 == 0)
-            btn_color = (0, 0, 255) if flash_on else (0, 0, 100)
-            cv2.circle(sidebar, btn_center, btn_radius, btn_color, -1)
+            # Steady active red light with subtle pulsing
+            pulse = int(180 + 75 * np.sin(time.time() * 8))
+            cv2.circle(sidebar, btn_center, btn_radius, (0, 0, pulse), -1)
             cv2.circle(sidebar, btn_center, btn_radius + 4, (0, 0, 255), 2)
             cv2.putText(sidebar, "BRAKE", (103, 375), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.putText(sidebar, "ENGAGED", (90, 395), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
@@ -151,7 +169,7 @@ class RaptorDefenseSystem:
         return np.hstack([frame, sidebar])
 
     def visualize_data(self):
-        """Day 13: Matplotlib Post-Flight Trajectory Analysis."""
+        """Day 13: Matplotlib Post-Flight Trajectory Analysis with Noise Filtering."""
         list_of_files = glob.glob(os.path.join(self.recordings_dir, '*.csv'))
         if not list_of_files:
             return
@@ -161,20 +179,33 @@ class RaptorDefenseSystem:
             if df.empty or 'X_Coord' not in df.columns:
                 return
 
+            # Apply rolling filter so the plot shows clean aerodynamic flight path instead of jitter
+            df['X_Smooth'] = df['X_Coord'].rolling(window=7, min_periods=1, center=True).mean()
+            df['Y_Smooth'] = df['Y_Coord'].rolling(window=7, min_periods=1, center=True).mean()
+
+            # Downsample slightly for clean scatter points
+            sample_df = df.iloc[::4]
+
             plt.figure(figsize=(10, 6))
-            plt.plot(df['X_Coord'], df['Y_Coord'], marker='o', linestyle='-', color='red', markersize=4, label='Raptor Trajectory')
-            plt.gca().add_patch(plt.Rectangle((200, 100), 240, 280, color='blue', alpha=0.2, label='Turbine Hazard Zone'))
-            plt.title('Altamont Pass Raptor Defense: Flight Trajectory Telemetry')
-            plt.xlabel('Camera X Coordinate (Pixels)')
-            plt.ylabel('Camera Y Coordinate (Pixels)')
+            # Smooth trajectory curve
+            plt.plot(df['X_Smooth'], df['Y_Smooth'], linestyle='-', color='crimson', linewidth=2.5, label='Raptor Trajectory')
+            plt.scatter(sample_df['X_Smooth'], sample_df['Y_Smooth'], color='darkred', s=20, zorder=3)
+
+            # Hazard Zone
+            plt.gca().add_patch(plt.Rectangle((200, 100), 240, 280, color='royalblue', alpha=0.25, label='Turbine Hazard Zone'))
+
+            plt.title('Altamont Pass Raptor Defense: Flight Trajectory Telemetry', fontsize=13, fontweight='bold')
+            plt.xlabel('Camera X Coordinate (Pixels)', fontsize=11)
+            plt.ylabel('Camera Y Coordinate (Pixels)', fontsize=11)
             plt.xlim(0, 640)
             plt.ylim(0, 480)
             plt.gca().invert_yaxis()
-            plt.grid(True, linestyle='--', alpha=0.7)
-            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.6)
+            plt.legend(loc='upper right')
             plt.tight_layout()
+
             plot_path = os.path.join(self.recordings_dir, 'latest_trajectory_plot.png')
-            plt.savefig(plot_path)
+            plt.savefig(plot_path, dpi=180)
             print(f"[SYSTEM] Flight trajectory visualization saved to: {plot_path}")
             plt.show()
         except Exception as e:
@@ -188,13 +219,17 @@ class RaptorDefenseSystem:
             print("[ERROR] Could not open video source.")
             return
 
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
-        fps = fps if fps > 0 else 30
+        is_webcam = isinstance(self.video_source, int)
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if video_fps <= 0 or np.isnan(video_fps):
+            video_fps = 30.0
+        frame_interval = 1.0 / video_fps
+
         dashboard_w = 640 + 260
         video_out_path = os.path.join(self.recordings_dir, f'{timestamp}_video_processing.mp4')
         out = cv2.VideoWriter(
             video_out_path,
-            cv2.VideoWriter_fourcc(*'mp4v'), fps, (dashboard_w, 480)
+            cv2.VideoWriter_fourcc(*'mp4v'), int(video_fps), (dashboard_w, 480)
         )
 
         csv_path = os.path.join(self.recordings_dir, f'{timestamp}_telemetry.csv')
@@ -211,9 +246,9 @@ class RaptorDefenseSystem:
         frame_count = 0
         tracker = None
         tracking_active = False
-        fps_display = 0
+        fps_display = video_fps
 
-        print("[SYSTEM] Command Center online! Press 'q' to shut down safely.")
+        print(f"[SYSTEM] Command Center online! Running at {video_fps:.1f} FPS native pacing. Press 'q' to quit.")
 
         while True:
             frame = self.frame_queue.get()
@@ -225,12 +260,11 @@ class RaptorDefenseSystem:
             frame_count += 1
 
             zone_color = (0, 0, 255)
-            alert_triggered = False
             detected_box = None
             conf_score = 0.0
             tracking_mode = "YOLO INFERENCE"
 
-            # Day 18: Edge Optimization (YOLO every 5 frames; KCF Tracking in-between)
+            # Day 18: Edge Optimization (YOLO every 5 frames; Tracker in-between)
             if frame_count % 5 == 0 or not tracking_active:
                 results = self.model.predict(source=frame, verbose=False)
                 best_conf = 0
@@ -262,29 +296,41 @@ class RaptorDefenseSystem:
                 else:
                     tracking_active = False
 
-            cx, cy = None, None
+            scx, scy = None, None
             if detected_box:
                 x, y, w, h = detected_box
-                cx = int(x + w / 2)
-                cy = int(y + h / 2)
+                raw_cx = int(x + w / 2)
+                raw_cy = int(y + h / 2)
 
-                trail.append((cx, cy))
+                # Smooth coordinates to remove frame-to-frame pixel jitter
+                if self.smooth_x is None:
+                    self.smooth_x, self.smooth_y = float(raw_cx), float(raw_cy)
+                else:
+                    self.smooth_x = 0.35 * raw_cx + 0.65 * self.smooth_x
+                    self.smooth_y = 0.35 * raw_cy + 0.65 * self.smooth_y
+
+                scx, scy = int(self.smooth_x), int(self.smooth_y)
+
+                trail.append((scx, scy))
                 if len(trail) > 30:
                     trail.pop(0)
 
-                alert_triggered, frame = self.check_collision(cx, cy, trail, frame)
+                # Check collision and compute predictive velocity vector
+                alert_triggered, frame = self.check_collision(scx, scy, trail, frame)
 
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                label = f"Target {conf_score:.2f}" if tracking_mode == "YOLO INFERENCE" else "Target (Tracked)"
-                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+                label = f"Raptor {conf_score:.2f}" if tracking_mode == "YOLO INFERENCE" else "Raptor (Tracked)"
+                cv2.putText(frame, label, (x, max(20, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.circle(frame, (scx, scy), 5, (0, 255, 0), -1)
 
-                self.write_telemetry(csv_writer, "Raptor", cx, cy)
+                self.write_telemetry(csv_writer, "Raptor", scx, scy)
+            else:
+                alert_triggered = (time.time() < self.brake_latch_until)
 
             if alert_triggered:
-                print("[CRITICAL] TURBINE BRAKE ENGAGED - PREDICTIVE OR DIRECT BREACH")
-                if int(time.time() * 8) % 2 == 0:
-                    zone_color = (0, 255, 255)
+                print("[CRITICAL] TURBINE BRAKE ENGAGED - AIRSPACE BREACH")
+                if int(time.time() * 6) % 2 == 0:
+                    zone_color = (0, 255, 255)  # Flashing yellow warning on hazard zone
 
             # Draw turbine danger zone polygon with alpha blending
             overlay = frame.copy()
@@ -296,19 +342,33 @@ class RaptorDefenseSystem:
             for i in range(1, len(trail)):
                 cv2.line(frame, trail[i - 1], trail[i], (0, 255, 0), 2)
 
+            # Frame processing timing & FPS smoothing
             end_time = time.time()
             loop_time = end_time - start_time
-            if loop_time > 0:
-                fps_display = int(1 / loop_time)
+            instant_fps = 1.0 / max(loop_time, 0.001)
+
+            # For video playback, cap instant FPS to the video's rate
+            if not is_webcam:
+                instant_fps = min(instant_fps, video_fps)
+
+            # Exponential Moving Average for smooth FPS readout
+            fps_display = 0.90 * fps_display + 0.10 * instant_fps
 
             dashboard_frame = self.render_dashboard(
-                frame, fps_display, cx, cy, conf_score, tracking_mode, alert_triggered
+                frame, int(round(fps_display)), scx, scy, conf_score, tracking_mode, alert_triggered
             )
 
             out.write(dashboard_frame)
             cv2.imshow("Raptor Defense System - Command Center", dashboard_frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Real-time frame pacing: wait exactly enough time to match video FPS
+            if not is_webcam:
+                elapsed_ms = (time.time() - start_time) * 1000.0
+                delay_ms = max(1, int((frame_interval * 1000.0) - elapsed_ms))
+            else:
+                delay_ms = 1
+
+            if cv2.waitKey(delay_ms) & 0xFF == ord('q'):
                 break
 
         self.running = False
@@ -323,8 +383,7 @@ class RaptorDefenseSystem:
 
 if __name__ == "__main__":
     import sys
-    # Default to eagle_flying.webm if present; otherwise webcam 0
-    default_source = "eagle_flying.webm" if os.path.exists("eagle_flying.webm") else 0
+    default_source = "eagle_flying.mp4" if os.path.exists("eagle_flying.mp4") else 0
     video_arg = sys.argv[1] if len(sys.argv) > 1 else default_source
 
     if video_arg in ["0", "webcam", "camera"]:

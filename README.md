@@ -20,7 +20,7 @@ cd "Altamont Pass Project"
 source .venv/bin/activate
 pip install -r requirements.txt
 
-python main.py                  # runs on eagle_flying.webm
+python main.py                  # runs on eagle_flying.mp4
 python main.py myvideo.mp4      # runs on any video you give it
 python main.py webcam           # runs on your webcam instead
 ```
@@ -47,7 +47,7 @@ python plot_data.py
 
 ## Video credit
 
-`eagle_flying.webm` is [Kite eagle flying](https://commons.wikimedia.org/wiki/File:Kite_eagle_flying.webm) from Wikimedia Commons. See that page for the license and author.
+`eagle_flying.mp4` is [Kite eagle flying](https://commons.wikimedia.org/wiki/File:Kite_eagle_flying.mp4) from Wikimedia Commons. See that page for the license and author.
 
 ## Still to do
 
