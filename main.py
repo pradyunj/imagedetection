@@ -299,5 +299,13 @@ class RaptorDefenseSystem:
         self.visualize_data()
 
 if __name__ == "__main__":
-    system = RaptorDefenseSystem(video_source="birdtest.mp4")
+    import sys
+    # Default to birdtest.mp4 if present; otherwise webcam 0
+    default_source = "birdtest.mp4" if os.path.exists("birdtest.mp4") else 0
+    video_arg = sys.argv[1] if len(sys.argv) > 1 else default_source
+
+    if video_arg in ["0", "webcam", "camera"]:
+        video_arg = 0
+
+    system = RaptorDefenseSystem(video_source=video_arg)
     system.start()
