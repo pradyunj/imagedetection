@@ -20,8 +20,9 @@ cd "Altamont Pass Project"
 source .venv/bin/activate
 pip install -r requirements.txt
 
-python main.py           # runs on birdtest.mp4
-python main.py webcam    # runs on your webcam instead
+python main.py                  # runs on eagle_flying.webm
+python main.py myvideo.mp4      # runs on any video you give it
+python main.py webcam           # runs on your webcam instead
 ```
 
 Press `q` to quit. Recordings and CSV logs get saved in `recordings/`.
@@ -43,6 +44,10 @@ python plot_data.py
 - It uses `best.pt` if there's a custom trained model in the folder. Otherwise it falls back to the regular `yolov8n.pt`, which just detects "bird" in general and not eagles specifically.
 - To keep it fast, it only runs YOLO every 5th frame and uses a simpler tracker (KCF) for the frames in between.
 - The danger zone is just a fixed box on the screen right now. A real setup would need to map it to where the blades actually are.
+
+## Video credit
+
+`eagle_flying.webm` is [Kite eagle flying](https://commons.wikimedia.org/wiki/File:Kite_eagle_flying.webm) from Wikimedia Commons. See that page for the license and author.
 
 ## Still to do
 

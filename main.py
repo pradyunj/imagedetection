@@ -19,8 +19,16 @@ import queue
 from datetime import datetime
 from ultralytics import YOLO
 
+def create_tracker():
+    """KCF is only in opencv-contrib, so fall back to MIL (included in regular OpenCV)."""
+    if hasattr(cv2, "TrackerKCF_create"):
+        return cv2.TrackerKCF_create()
+    if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
+        return cv2.legacy.TrackerKCF_create()
+    return cv2.TrackerMIL_create()
+
 class RaptorDefenseSystem:
-    def __init__(self, video_source="birdtest.mp4"):
+    def __init__(self, video_source="eagle_flying.webm"):
         # Auto-detect video source: fallback to webcam index 0 if video asset not present
         if isinstance(video_source, str) and not os.path.exists(video_source):
             print(f"[SYSTEM] Notice: Video asset '{video_source}' not found. Defaulting to live webcam (Index 0).")
@@ -35,6 +43,7 @@ class RaptorDefenseSystem:
 
         # Threading queue & output storage
         self.frame_queue = queue.Queue(maxsize=5)
+        self.running = True
         self.recordings_dir = os.path.join('recordings')
         os.makedirs(self.recordings_dir, exist_ok=True)
 
@@ -45,14 +54,27 @@ class RaptorDefenseSystem:
 
     def read_frames(self, cap):
         """Producer Thread: Continuously grabs hardware/video frames."""
-        while cap.isOpened():
+        is_webcam = isinstance(self.video_source, int)
+        while cap.isOpened() and self.running:
             ret, frame = cap.read()
             if not ret:
                 break
-            # Drop older frames if buffer is full to prevent latency buildup
-            if not self.frame_queue.full():
-                self.frame_queue.put(frame)
-        self.frame_queue.put(None)
+            if is_webcam:
+                # Webcam: skip frames if we're behind so the feed stays live
+                if not self.frame_queue.full():
+                    self.frame_queue.put(frame)
+            else:
+                # Video file: wait for room so we don't skip any frames
+                while self.running:
+                    try:
+                        self.frame_queue.put(frame, timeout=0.2)
+                        break
+                    except queue.Full:
+                        pass
+        try:
+            self.frame_queue.put(None, timeout=0.2)
+        except queue.Full:
+            pass
 
     def write_telemetry(self, csv_writer, name, cx, cy):
         """Researcher's Ledger: Streams real-time detection telemetry to CSV."""
@@ -227,13 +249,13 @@ class RaptorDefenseSystem:
                             conf_score = conf
 
                 if detected_box:
-                    tracker = cv2.TrackerKCF_create()
+                    tracker = create_tracker()
                     tracker.init(frame, detected_box)
                     tracking_active = True
                 else:
                     tracking_active = False
             else:
-                tracking_mode = "KCF TRACKING"
+                tracking_mode = "TRACKER"
                 success, box = tracker.update(frame)
                 if success:
                     detected_box = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
@@ -289,19 +311,20 @@ class RaptorDefenseSystem:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
+        self.running = False
+        producer_thread.join(timeout=2)
         cap.release()
         out.release()
         csv_file.close()
         cv2.destroyAllWindows()
-        producer_thread.join()
 
         print("[SYSTEM] Clean shutdown complete. Generating flight trajectory analytics...")
         self.visualize_data()
 
 if __name__ == "__main__":
     import sys
-    # Default to birdtest.mp4 if present; otherwise webcam 0
-    default_source = "birdtest.mp4" if os.path.exists("birdtest.mp4") else 0
+    # Default to eagle_flying.webm if present; otherwise webcam 0
+    default_source = "eagle_flying.webm" if os.path.exists("eagle_flying.webm") else 0
     video_arg = sys.argv[1] if len(sys.argv) > 1 else default_source
 
     if video_arg in ["0", "webcam", "camera"]:

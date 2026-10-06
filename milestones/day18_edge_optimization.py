@@ -9,6 +9,14 @@ import cv2
 import time
 from ultralytics import YOLO
 
+def create_tracker():
+    """KCF is only in opencv-contrib, so fall back to MIL (included in regular OpenCV)."""
+    if hasattr(cv2, "TrackerKCF_create"):
+        return cv2.TrackerKCF_create()
+    if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
+        return cv2.legacy.TrackerKCF_create()
+    return cv2.TrackerMIL_create()
+
 model = YOLO("yolov8n.pt")
 cap = cv2.VideoCapture(0)
 
@@ -38,14 +46,14 @@ while True:
                 best_box = (x1, y1, x2 - x1, y2 - y1)
                 break
         if best_box:
-            tracker = cv2.TrackerKCF_create()
+            tracker = create_tracker()
             tracker.init(frame, best_box)
             detected_box = best_box
             tracking_active = True
         else:
             tracking_active = False
     else:
-        mode = "KCF TRACKING"
+        mode = "TRACKER"
         ok, box = tracker.update(frame)
         if ok:
             detected_box = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
