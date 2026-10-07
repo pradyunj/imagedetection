@@ -128,18 +128,18 @@ class RaptorDefenseSystem:
         sidebar = np.zeros((480, sidebar_w, 3), dtype=np.uint8)
 
         # Header Title
-        cv2.putText(sidebar, "TURBINE DEFENSE", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(sidebar, "COMMAND CENTER", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
+        cv2.putText(sidebar, "ALTAMONT PASS", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(sidebar, "TURBINE MONITOR", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
         cv2.line(sidebar, (20, 85), (240, 85), (70, 70, 70), 1)
 
         # Telemetry Block
-        cv2.putText(sidebar, "SYSTEM TELEMETRY", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.putText(sidebar, "SYSTEM STATUS", (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         cv2.putText(sidebar, f"FPS: {fps_val}", (20, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-        cv2.putText(sidebar, f"ENGINE: {tracking_mode}", (20, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
+        cv2.putText(sidebar, f"MODE: {tracking_mode}", (20, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
 
-        status_text = "ACQUIRED" if cx is not None else "SCANNING..."
+        status_text = "DETECTED" if cx is not None else "SCANNING..."
         status_color = (0, 255, 0) if cx is not None else (100, 100, 100)
-        cv2.putText(sidebar, f"TARGET: {status_text}", (20, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 1)
+        cv2.putText(sidebar, f"BIRD: {status_text}", (20, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 1)
 
         coord_text = f"X: {cx}  Y: {cy}" if cx is not None else "X: ---  Y: ---"
         cv2.putText(sidebar, coord_text, (20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
@@ -163,8 +163,8 @@ class RaptorDefenseSystem:
         else:
             cv2.circle(sidebar, btn_center, btn_radius, (0, 180, 0), -1)
             cv2.circle(sidebar, btn_center, btn_radius + 4, (0, 255, 0), 2)
-            cv2.putText(sidebar, "AIRSPACE", (90, 375), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-            cv2.putText(sidebar, "SECURE", (97, 395), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            cv2.putText(sidebar, "ALL", (90, 375), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            cv2.putText(sidebar, "CLEAR", (97, 395), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
         return np.hstack([frame, sidebar])
 
@@ -319,7 +319,7 @@ class RaptorDefenseSystem:
                 alert_triggered, frame = self.check_collision(scx, scy, trail, frame)
 
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                label = f"Raptor {conf_score:.2f}" if tracking_mode == "YOLO INFERENCE" else "Raptor (Tracked)"
+                label = f"Eagle {conf_score:.2f}" if tracking_mode == "YOLO INFERENCE" else "Eagle (Tracked)"
                 cv2.putText(frame, label, (x, max(20, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 cv2.circle(frame, (scx, scy), 5, (0, 255, 0), -1)
 
@@ -328,7 +328,7 @@ class RaptorDefenseSystem:
                 alert_triggered = (time.time() < self.brake_latch_until)
 
             if alert_triggered:
-                print("[CRITICAL] TURBINE BRAKE ENGAGED - AIRSPACE BREACH")
+                print("Brake engaged: bird near blades")
                 if int(time.time() * 6) % 2 == 0:
                     zone_color = (0, 255, 255)  # Flashing yellow warning on hazard zone
 
@@ -359,7 +359,7 @@ class RaptorDefenseSystem:
             )
 
             out.write(dashboard_frame)
-            cv2.imshow("Raptor Defense System - Command Center", dashboard_frame)
+            cv2.imshow("Altamont Pass Bird Tracker", dashboard_frame)
 
             # Real-time frame pacing: wait exactly enough time to match video FPS
             if not is_webcam:
