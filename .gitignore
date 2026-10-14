@@ -24,3 +24,4 @@ Thumbs.db
 recordings/
 *.csv
 output/
+flight_trajectory_analysis.png
