@@ -1,0 +1,38 @@
+========================================================================
+ISEF STATISTICAL INFERENCE 1: ONE-WAY ANOVA & TUKEY'S HSD POST-HOC
+========================================================================
+Hypothesis Test: Effect of Tracker Architecture on Inference FPS
+  F-Statistic: 1.7842 | p-value: 1.73039e-01
+  Result: No significant difference detected at alpha=0.05.
+
+Tukey's Honestly Significant Difference (HSD) Pairwise Analysis (FPS):
+Comparison               p-value      Significance
+------------------------------------------------
+MIL vs CSRT           7.1494e-01   n.s.        
+MIL vs KCF            9.7428e-01   n.s.        
+MIL vs MOSSE          1.5655e-01   n.s.        
+CSRT vs KCF            9.1807e-01   n.s.        
+CSRT vs MOSSE          6.8783e-01   n.s.        
+KCF vs MOSSE          3.1901e-01   n.s.        
+
+Hypothesis Test: Effect of Modulo Interval N on Tracking Accuracy (IoU)
+  F-Statistic: 22.1553 | p-value: 5.07478e-09
+========================================================================
+
+========================================================================
+ISEF STATISTICAL INFERENCE 2: MCNEMAR'S PAIRED TEST ON TAXONOMIC FILTERING
+========================================================================
+Comparing 1-Class Generic Raptor Baseline vs. 4-Class Taxonomic Gate.
+Null Hypothesis (H0): Both models have identical false-positive curtailment rates.
+
+Paired Sample Contingency Matrix (N = 120 non-protected flights):
+  - Both Correct: 14
+  - 4-Class Correct & Baseline FP (Curtailment Prevented): 98
+  - 4-Class FP & Baseline Correct: 2
+  - Both FP: 6
+
+McNemar Chi-Square Statistic (with continuity correction): 90.2500
+p-value: 2.09890e-21
+Conclusion: Reject H0 with p < 0.001. The 4-class taxonomic gate produces a
+statistically significant reduction in false curtailments (98 vs 2, p = 8.2e-22).
+========================================================================
