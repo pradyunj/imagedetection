@@ -92,9 +92,22 @@ class ScadaSerialController:
             self.tachometer_rpm = config.NOMINAL_RPM * max(0.0, 1.0 - fraction)
         return True
 
+    def send_blade_pitch(self, pitch_deg: float) -> bool:
+        return self.send_pitch_command(pitch_deg=pitch_deg, brake_active=False)
+
+    def emergency_feather(self) -> bool:
+        return self.send_pitch_command(pitch_deg=config.PITCH_FEATHERED_DEG, brake_active=True)
+
+    def resume_nominal(self) -> bool:
+        return self.send_pitch_command(pitch_deg=config.PITCH_OPERATING_DEG, brake_active=False)
+
     def get_telemetry(self) -> Tuple[float, float, str]:
         with self._lock:
             return self.tachometer_rpm, self.telemetry_pitch, self.status_msg
+
+    def read_telemetry(self) -> Dict[str, Any]:
+        rpm, pitch, status = self.get_telemetry()
+        return {"rpm": rpm, "pitch_deg": pitch, "status": status}
 
     def close(self):
         self._running = False
