@@ -2,21 +2,21 @@
 ISEF STATISTICAL INFERENCE 1: ONE-WAY ANOVA & TUKEY'S HSD POST-HOC
 ========================================================================
 Hypothesis Test: Effect of Tracker Architecture on Inference FPS
-  F-Statistic: 1.7842 | p-value: 1.73039e-01
+  F-Statistic: 0.0920 | p-value: 9.63842e-01
   Result: No significant difference detected at alpha=0.05.
 
 Tukey's Honestly Significant Difference (HSD) Pairwise Analysis (FPS):
 Comparison               p-value      Significance
 ------------------------------------------------
-MIL vs CSRT           7.1494e-01   n.s.        
-MIL vs KCF            9.7428e-01   n.s.        
-MIL vs MOSSE          1.5655e-01   n.s.        
-CSRT vs KCF            9.1807e-01   n.s.        
-CSRT vs MOSSE          6.8783e-01   n.s.        
-KCF vs MOSSE          3.1901e-01   n.s.        
+MIL vs CSRT           9.9969e-01   n.s.        
+MIL vs KCF            9.7101e-01   n.s.        
+MIL vs MOSSE          9.8078e-01   n.s.        
+CSRT vs KCF            9.8560e-01   n.s.        
+CSRT vs MOSSE          9.9166e-01   n.s.        
+KCF vs MOSSE          9.9992e-01   n.s.        
 
 Hypothesis Test: Effect of Modulo Interval N on Tracking Accuracy (IoU)
-  F-Statistic: 22.1553 | p-value: 5.07478e-09
+  F-Statistic: 321.6488 | p-value: 3.88882e-22
 ========================================================================
 
 ========================================================================
