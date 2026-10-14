@@ -1,6 +1,6 @@
 import time
 import threading
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any, Dict
 try:
     import serial
     import serial.tools.list_ports
@@ -11,10 +11,11 @@ except ImportError:
 import config
 
 class ScadaSerialController:
-    def __init__(self, port: Optional[str] = None, baudrate: int = 115200, timeout: float = 0.1):
+    def __init__(self, port: Optional[str] = None, baudrate: int = 115200, timeout: float = 0.1, mock: bool = False):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
+        self.mock = mock
         self.ser: Optional[Any] = None
         self.simulated = True
         
@@ -24,7 +25,8 @@ class ScadaSerialController:
         self._running = False
         self._lock = threading.Lock()
 
-        self._connect()
+        if not self.mock:
+            self._connect()
 
     def _find_arduino_port(self) -> Optional[str]:
         if not SERIAL_AVAILABLE:
