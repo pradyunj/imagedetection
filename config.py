@@ -17,6 +17,7 @@ ZONE_PTS = np.array([
     [ZONE_MAX_X, ZONE_MAX_Y],
     [ZONE_MIN_X, ZONE_MAX_Y]
 ], dtype=np.int32).reshape((-1, 1, 2))
+ZONE_POLYGON = ZONE_PTS
 
 TURBINE_RATED_POWER_MW = 2.3
 ROTOR_RADIUS_M = 53.0
