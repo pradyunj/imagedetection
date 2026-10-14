@@ -1,55 +1,81 @@
 # Altamont Pass Project
 
-Wind turbines at Altamont Pass kill a lot of golden eagles and other raptors every year. This project is my attempt at a camera system that spots a bird, tracks where it's going, and "brakes" the turbine if the bird is about to fly into the blades.
+Wind turbines at Altamont Pass kill golden eagles and other raptors every year. This project is an autonomous computer vision and physics curtailment system that spots raptors, tracks their trajectory in real-time, differentiates protected eagles from non-protected species, and triggers turbine blade feathering before a collision can happen.
 
-It uses OpenCV for the video stuff and YOLOv8 for detecting birds.
+## How it works
 
-## What it does
-
-- Detects birds in a video (or webcam feed) using YOLOv8
-- Draws a trail behind the bird so you can see its flight path
-- Has a red "danger zone" box that stands in for the turbine blades
-- Guesses where the bird will be a second from now based on how it's moving
-- If the bird is in the zone (or headed for it), the dashboard flashes BRAKE ENGAGED
-- Logs the bird's position to a CSV file and plots the flight path when you quit
+1. **Detection & Tracking**: YOLOv8 neural detector coupled with IoU Hungarian matching and multi-object trackers (MIL, CSRT, KCF, MOSSE). Running YOLO every $N$th frame and tracking in between cuts edge latency while maintaining real-time 30+ FPS.
+2. **Taxonomic Filtering**: Differentiates Class 0 (Protected Eagles) from sympatric species like Turkey Vultures (Class 1) and Common Ravens (Class 2), preventing unnecessary turbine shutdowns and power loss.
+3. **4-State Kalman Filter**: Filters $[x, y, v_x, v_y]^T$ state vectors to remove wing-flap jitter and compute stable velocity projections.
+4. **Flight Path Tortuosity Gate**: Calculates path tortuosity ($S_{\text{tortuosity}}$) over a 30-frame window. If an eagle is circling in a thermal ($S < 0.45$), curtailment alarms are suppressed. If it is direct gliding or stooping ($S \ge 0.45$), predictive collision checks are engaged.
+5. **Turbine Blade Pitch Dynamics**: Models collective blade pitch ODE ($\tau \dot{\beta} + \beta = \beta_{\text{target}}$) with rate limit $\dot{\beta}_{\max} = 8^\circ/\text{s}$ and aerodynamic rotor deceleration over a 15-second Time-to-Collision (TTC) horizon.
+6. **Hardware-in-the-Loop SCADA**: Communicates with turbine pitch microcontrollers (Arduino / ESP32) over USB Serial with real-time tachometer RPM readback.
 
 ## How to run it
 
+Activate your virtual environment and install the packages:
+
 ```bash
-cd "Altamont Pass Project"
 source .venv/bin/activate
 pip install -r requirements.txt
-
-python main.py                  # runs on eagle_flying.mp4
-python main.py myvideo.mp4      # runs on any video you give it
-python main.py webcam           # runs on your webcam instead
 ```
 
-Press `q` to quit. Recordings and CSV logs get saved in `recordings/`.
-
-To plot a flight path from the latest CSV:
+### Run the live monitor:
 
 ```bash
+# Run with default video (eagle_flying.mp4)
+python main.py
+
+# Run on live webcam
+python main.py webcam
+
+# Run on a custom video
+python main.py path/to/video.mp4
+
+# Advanced options:
+python main.py --buffer ring --modulo 5 --tracker MIL
+```
+
+Press `q` to quit. Live video recordings and flight telemetry CSV logs are saved in `recordings/` and `experiments/results/`.
+
+### Run experimental benchmarks and statistical suite:
+
+```bash
+# Run headless tracker and modulo ablation benchmark
+python experiments/run_ablations.py
+
+# Run ANOVA, Tukey HSD, McNemar tests, and generate 300 DPI publication plots
+python experiments/stats_analysis.py
+
+# Standalone trajectory visualizer
 python plot_data.py
 ```
 
-## Files
+## Project Structure
 
-- `main.py` - the full program
-- `plot_data.py` - makes a graph of the flight path from the CSV
-- `milestones/` - one script for each day of the build, so you can see how it came together step by step
+```
+.
+├── config.py                   # Central turbine constants, zone polygons, and taxonomy
+├── main.py                     # Main orchestrator
+├── core/
+│   ├── buffer.py               # Concurrency buffers (FIFO / Ring) and frame pacer
+│   ├── detector.py             # Multi-class detector, Hungarian matching, and trackers
+│   └── kinematics.py           # Kalman filter, tortuosity gate, and turbine pitch ODE
+├── hardware/
+│   └── scada_serial.py         # Hardware SCADA serial controller with software mock
+├── ui/
+│   └── dashboard.py            # Telemetry HUD with pitch gauge, RPM, and tortuosity
+├── models/
+│   └── yolov8n-p2.yaml         # High-resolution stride-4 (160x160) architecture
+├── experiments/
+│   ├── run_ablations.py        # Headless ablation benchmark runner
+│   ├── stats_analysis.py       # One-way ANOVA, Tukey HSD, McNemar test, and plots
+│   ├── train_cloud.py          # 4-class cloud / cluster training script
+│   ├── train_colab.ipynb       # Google Colab GPU training notebook
+│   └── results/                # CSV logs, reports, and 300 DPI publication figures
+└── plot_data.py                # Standalone trajectory plotter
+```
 
-## Notes
+## Video Credit
 
-- It uses `best.pt` if there's a custom trained model in the folder. Otherwise it falls back to the regular `yolov8n.pt`, which just detects "bird" in general and not eagles specifically.
-- To keep it fast, it only runs YOLO every 5th frame and uses a simpler tracker (KCF) for the frames in between.
-- The danger zone is just a fixed box on the screen right now. A real setup would need to map it to where the blades actually are.
-
-## Video credit
-
-`eagle_flying.mp4` is [Kite eagle flying](https://commons.wikimedia.org/wiki/File:Kite_eagle_flying.mp4) from Wikimedia Commons. See that page for the license and author.
-
-## Still to do
-
-- Train a custom model on an eagle dataset from Roboflow
-- Test on real footage from Altamont Pass
+`eagle_flying.mp4` is [Kite eagle flying](https://commons.wikimedia.org/wiki/File:Kite_eagle_flying.mp4) from Wikimedia Commons.
