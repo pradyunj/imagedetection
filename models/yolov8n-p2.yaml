@@ -1,0 +1,51 @@
+# Ultralytics YOLOv8-P2 Architecture Specification
+# Enhanced 4-Head High-Resolution Aerial Raptor Detection Network
+# Stride-4 (160x160) feature map layer for distant small raptor targets
+
+# Parameters
+nc: 4 # number of taxonomic classes
+scales:
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]
+
+# YOLOv8.0n backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]] # 2
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 6, C2f, [256, True]] # 4
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 6, C2f, [512, True]] # 6
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 3, C2f, [1024, True]] # 8
+  - [-1, 1, SPPF, [1024, 5]] # 9
+
+# YOLOv8.0n-P2 head with 4 detection scales: P2, P3, P4, P5
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 10 (P4/16)
+  - [[-1, 6], 1, Concat, [1]] # 11 cat backbone P4
+  - [-1, 3, C2f, [512]] # 12
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 13 (P3/8)
+  - [[-1, 4], 1, Concat, [1]] # 14 cat backbone P3
+  - [-1, 3, C2f, [256]] # 15
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 16 (P2/4)
+  - [[-1, 2], 1, Concat, [1]] # 17 cat backbone P2
+  - [-1, 3, C2f, [128]] # 18 (P2/4-tiny detection scale)
+
+  - [-1, 1, Conv, [128, 3, 2]] # 19
+  - [[-1, 15], 1, Concat, [1]] # 20 cat head P3
+  - [-1, 3, C2f, [256]] # 21 (P3/8-small detection scale)
+
+  - [-1, 1, Conv, [256, 3, 2]] # 22
+  - [[-1, 12], 1, Concat, [1]] # 23 cat head P4
+  - [-1, 3, C2f, [512]] # 24 (P4/16-medium detection scale)
+
+  - [-1, 1, Conv, [512, 3, 2]] # 25
+  - [[-1, 9], 1, Concat, [1]] # 26 cat head P5
+  - [-1, 3, C2f, [1024]] # 27 (P5/32-large detection scale)
+
+  - [[18, 21, 24, 27], 1, Detect, [nc]] # 28 Detect(P2, P3, P4, P5)
