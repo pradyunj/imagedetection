@@ -49,8 +49,14 @@ TAXONOMIC_NAMES = {
 BUFFER_SIZE = 10
 DEFAULT_MODULO_N = 5
 DEFAULT_TRACKER = "MIL"
+SIDEBAR_WIDTH = 280
+DEFAULT_VIDEO_SOURCE = "eagle_flying.mp4"
 
-RECORDINGS_DIR = "recordings"
-EXPERIMENTS_DIR = "experiments/results"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+RECORDINGS_DIR = os.path.join(PROJECT_ROOT, "recordings")
+EXPERIMENTS_DIR = os.path.join(PROJECT_ROOT, "experiments", "results")
+LOG_DIR = EXPERIMENTS_DIR
+
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(EXPERIMENTS_DIR, exist_ok=True)
+
