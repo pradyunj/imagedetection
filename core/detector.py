@@ -69,7 +69,8 @@ class MultiTargetDetector:
         tracker_type: str = config.DEFAULT_TRACKER,
         modulo_n: int = config.DEFAULT_MODULO_N,
         iou_match_threshold: float = 0.25,
-        max_missed_frames: int = 5
+        max_missed_frames: int = 5,
+        conf_threshold: float = 0.35
     ):
         actual_model = "best.pt" if os.path.exists("best.pt") else model_path
         self.model = YOLO(actual_model)
@@ -78,6 +79,7 @@ class MultiTargetDetector:
         self.modulo_n = modulo_n
         self.iou_match_threshold = iou_match_threshold
         self.max_missed_frames = max_missed_frames
+        self.conf_threshold = conf_threshold
         
         self.targets: Dict[int, TrackedTarget] = {}
         self.next_track_id = 1
@@ -106,7 +108,7 @@ class MultiTargetDetector:
 
         for box in results[0].boxes:
             conf = float(box.conf[0].item())
-            if conf < 0.35:
+            if conf < self.conf_threshold:
                 continue
 
             raw_cls = int(box.cls[0].item())
