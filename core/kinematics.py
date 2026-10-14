@@ -215,3 +215,25 @@ class KinematicsEngine:
             "rpm": rpm,
             "annotated_frame": frame
         }
+
+    def evaluate_idle(self, frame: np.ndarray) -> Dict[str, Any]:
+        now = time.time()
+        brake_active = (now < self.brake_latch_until)
+        target_pitch = config.PITCH_FEATHERED_DEG if brake_active else config.PITCH_OPERATING_DEG
+        pitch_deg, rpm = self.turbine.step(target_pitch)
+        return {
+            "smooth_x": None,
+            "smooth_y": None,
+            "vx": 0.0,
+            "vy": 0.0,
+            "tortuosity": 1.0,
+            "is_circling_thermal": False,
+            "direct_breach": False,
+            "predictive_hit": False,
+            "ttc": 999.0,
+            "curtailment_required": False,
+            "brake_active": brake_active,
+            "pitch_deg": pitch_deg,
+            "rpm": rpm,
+            "annotated_frame": frame
+        }
