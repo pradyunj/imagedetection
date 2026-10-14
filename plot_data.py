@@ -9,8 +9,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 def plot_flight_telemetry(csv_path=None):
+    recordings = glob.glob("experiments/results/*_telemetry.csv") or glob.glob("recordings/*_telemetry.csv") or glob.glob("*.csv")
     if csv_path is None or not os.path.exists(csv_path):
-        recordings = glob.glob("recordings/*_telemetry.csv") or glob.glob("*.csv")
         if not recordings:
             print("[NOTICE] No flight telemetry CSV found. Run main.py first to generate telemetry.")
             return
@@ -19,13 +19,16 @@ def plot_flight_telemetry(csv_path=None):
     print(f"[SYSTEM] Ingesting flight telemetry from: {csv_path}")
     df = pd.read_csv(csv_path)
 
-    if df.empty or "X_Coord" not in df.columns:
+    x_col = "Smooth_X" if "Smooth_X" in df.columns else ("X_Coord" if "X_Coord" in df.columns else None)
+    y_col = "Smooth_Y" if "Smooth_Y" in df.columns else ("Y_Coord" if "Y_Coord" in df.columns else None)
+
+    if df.empty or x_col is None or y_col is None:
         print("[ERROR] CSV is empty or missing coordinate columns.")
         return
 
     # Filter jitter and compute aerodynamic trajectory curve
-    df['X_Smooth'] = df['X_Coord'].rolling(window=7, min_periods=1, center=True).mean()
-    df['Y_Smooth'] = df['Y_Coord'].rolling(window=7, min_periods=1, center=True).mean()
+    df['X_Smooth'] = df[x_col].rolling(window=7, min_periods=1, center=True).mean()
+    df['Y_Smooth'] = df[y_col].rolling(window=7, min_periods=1, center=True).mean()
     sample_df = df.iloc[::4]
 
     plt.figure(figsize=(10, 6))
