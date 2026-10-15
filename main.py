@@ -248,8 +248,120 @@ class RaptorDetector:
 
 
 # ============================================================================
+# 4. 4-STATE KALMAN FILTER, TORTUOSITY GATE & 2D RAY-CIRCLE TTC
+# ============================================================================
 
-from core.kinematics import TrajectoryKinematics
+class TrajectoryKinematics:
+    def __init__(self, fps: float = 30.0):
+        self.fps = max(1.0, fps)
+        self.history = collections.deque(maxlen=TORTUOSITY_WINDOW_FRAMES)
+        self.kf = self._init_kalman(1.0 / self.fps)
+        self.initialized = False
+
+    def _init_kalman(self, dt: float) -> cv2.KalmanFilter:
+        kf = cv2.KalmanFilter(4, 2)
+        kf.transitionMatrix = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=np.float32)
+        kf.measurementMatrix = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=np.float32)
+        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1.0
+        kf.errorCovPost = np.eye(4, dtype=np.float32)
+        return kf
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.initialized = False
+
+    def compute_tortuosity(self) -> float:
+        if len(self.history) < 5:
+            return 1.0
+        pts = np.array(self.history, dtype=np.float32)
+        step_distances = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        total_path_length = float(np.sum(step_distances))
+        if total_path_length < 1e-5:
+            return 1.0
+        straight_line_dist = float(np.linalg.norm(pts[-1] - pts[0]))
+        return float(np.clip(straight_line_dist / total_path_length, 0.0, 1.0))
+
+    def _compute_vector_ttc(self, pos: np.ndarray, vel: np.ndarray) -> float:
+        center = np.array(TURBINE_CENTER, dtype=np.float32)
+        rel = pos - center
+        dist = float(np.linalg.norm(rel))
+        if dist <= ROTOR_RADIUS_PX:
+            return 0.0
+
+        speed_sq = float(np.dot(vel, vel))
+        if speed_sq < 1e-3:
+            return 999.0
+
+        # Check if velocity has a closing component toward the rotor center
+        proj = float(np.dot(rel, vel))
+        if proj >= 0.0:
+            return 999.0
+
+        # Solve quadratic |rel + vel * t|^2 = R^2 for exact ray-circle entry
+        a = speed_sq
+        b = 2.0 * proj
+        c = dist * dist - float(ROTOR_RADIUS_PX ** 2)
+        disc = b * b - 4.0 * a * c
+        if disc >= 0.0:
+            t_hit = (-b - np.sqrt(disc)) / (2.0 * a)
+            if t_hit >= 0.0:
+                return float(t_hit)
+
+        # Fallback to radial closing speed when heading generally toward the rotor zone
+        closing_speed = -proj / dist
+        return float(max(0.0, (dist - ROTOR_RADIUS_PX) / max(closing_speed, 1e-3)))
+
+    def update(self, cx: int, cy: int, is_protected: bool, dt: float = 0.033) -> dict:
+        dt = max(1e-3, dt)
+        self.kf.transitionMatrix[0, 2] = dt
+        self.kf.transitionMatrix[1, 3] = dt
+
+        meas = np.array([[np.float32(cx)], [np.float32(cy)]])
+        if not self.initialized:
+            self.kf.statePost = np.array([[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]], dtype=np.float32)
+            self.initialized = True
+
+        self.kf.predict()
+        state = self.kf.correct(meas)
+        filt_x, filt_y, vx, vy = [float(v) for v in state.flatten()]
+
+        self.history.append((filt_x, filt_y))
+        tortuosity = self.compute_tortuosity()
+
+        pos_vec = np.array([filt_x, filt_y], dtype=np.float32)
+        vel_vec = np.array([vx, vy], dtype=np.float32)
+        dist_to_center = float(np.linalg.norm(pos_vec - np.array(TURBINE_CENTER, dtype=np.float32)))
+        ttc = self._compute_vector_ttc(pos_vec, vel_vec)
+
+        is_direct = tortuosity >= TORTUOSITY_THRESHOLD
+        should_curtail = bool(
+            is_protected and is_direct and (ttc <= TTC_CRITICAL_THRESHOLD_S or dist_to_center <= ROTOR_RADIUS_PX)
+        )
+
+        return {
+            "x": filt_x,
+            "y": filt_y,
+            "vx": vx,
+            "vy": vy,
+            "tortuosity": tortuosity,
+            "is_direct": is_direct,
+            "ttc": ttc,
+            "dist_px": dist_to_center,
+            "should_curtail": should_curtail,
+        }
+
+
+# ============================================================================
+
 from hardware.scada_serial import SCADAController
 from ui.dashboard import DashboardRenderer
  ============================================================================
