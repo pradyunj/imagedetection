@@ -109,8 +109,146 @@ class FramePacer:
 
 
 # ============================================================================
+# 3. DETECTOR, IOU HUNGARIAN MATCHING & MODULO TRACKING
+# ============================================================================
 
-from core.detector import RaptorDetector
+def compute_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
+    ax1, ay1, aw, ah = box_a
+    bx1, by1, bw, bh = box_b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    area_a = max(1, aw * ah)
+    area_b = max(1, bw * bh)
+    return float(inter_area / (area_a + area_b - inter_area + 1e-6))
+
+
+class RaptorDetector:
+    def __init__(self, modulo: int = 5, tracker_type: str = "MIL"):
+        self.modulo = max(1, modulo)
+        self.tracker_type = tracker_type
+        self.tracker = None
+        self.tracking_active = False
+        self.last_bbox = None
+        self.class_id = PROTECTED_CLASS_ID
+        self.confidence = 0.0
+        self.is_coco_model = False
+
+        try:
+            from ultralytics import YOLO
+            self.model = YOLO(MODEL_PATH)
+            self.has_yolo = True
+            names = getattr(self.model, "names", {})
+            if isinstance(names, dict) and names.get(14) == "bird":
+                self.is_coco_model = True
+        except Exception:
+            self.has_yolo = False
+
+    def _create_tracker(self):
+        if self.tracker_type == "CSRT" and hasattr(cv2, "TrackerCSRT_create"):
+            return cv2.TrackerCSRT_create()
+        if self.tracker_type == "KCF" and hasattr(cv2, "TrackerKCF_create"):
+            return cv2.TrackerKCF_create()
+        if self.tracker_type == "MOSSE" and hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerMOSSE_create"):
+            return cv2.legacy.TrackerMOSSE_create()
+        return cv2.TrackerMIL_create()
+
+    def _select_best_detection(self, candidates: list) -> Optional[dict]:
+        if not candidates:
+            return None
+        if self.last_bbox is not None and len(candidates) > 1:
+            cost_matrix = np.array([[1.0 - compute_iou(self.last_bbox, c["bbox"])] for c in candidates])
+            try:
+                from scipy.optimize import linear_sum_assignment
+                row_ind, _ = linear_sum_assignment(cost_matrix)
+                best_idx = int(row_ind[0])
+            except Exception:
+                best_idx = int(np.argmin(cost_matrix[:, 0]))
+            if 1.0 - cost_matrix[best_idx, 0] >= IOU_THRESHOLD:
+                return candidates[best_idx]
+        return max(candidates, key=lambda c: c["conf"])
+
+    def process_frame(self, frame: np.ndarray, frame_index: int) -> dict:
+        h, w = frame.shape[:2]
+        run_detector = (frame_index % self.modulo == 1) or not self.tracking_active
+
+        if run_detector:
+            candidates = []
+            if self.has_yolo:
+                results = self.model(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)
+                for r in results:
+                    for box in r.boxes:
+                        raw_cid = int(box.cls[0].item())
+                        conf = float(box.conf[0].item())
+                        if self.is_coco_model:
+                            if raw_cid != 14:
+                                continue
+                            cid = PROTECTED_CLASS_ID
+                        else:
+                            cid = raw_cid if raw_cid in TAXONOMY_MAP else 3
+                        xywh = box.xywh[0].cpu().numpy()
+                        bbox = (
+                            int(xywh[0] - xywh[2] / 2),
+                            int(xywh[1] - xywh[3] / 2),
+                            int(xywh[2]),
+                            int(xywh[3]),
+                        )
+                        candidates.append({"bbox": bbox, "cid": cid, "conf": conf})
+            else:
+                candidates.append({
+                    "bbox": (int(w * 0.4), int(h * 0.3), 80, 60),
+                    "cid": PROTECTED_CLASS_ID,
+                    "conf": 0.88,
+                })
+
+            chosen = self._select_best_detection(candidates)
+            if chosen is not None:
+                self.tracker = self._create_tracker()
+                self.tracker.init(frame, chosen["bbox"])
+                self.tracking_active = True
+                self.last_bbox = chosen["bbox"]
+                self.class_id = chosen["cid"]
+                self.confidence = chosen["conf"]
+            else:
+                self.tracking_active = False
+
+        elif self.tracking_active and self.tracker is not None:
+            success, bbox = self.tracker.update(frame)
+            if success:
+                self.last_bbox = tuple(int(v) for v in bbox)
+            else:
+                self.tracking_active = False
+
+        if self.tracking_active and self.last_bbox is not None:
+            x, y, bw, bh = self.last_bbox
+            cx = x + bw // 2
+            cy = y + bh // 2
+            tax_info = TAXONOMY_MAP.get(self.class_id, TAXONOMY_MAP[0])
+            return {
+                "detected": True,
+                "bbox": (x, y, bw, bh),
+                "cx": cx,
+                "cy": cy,
+                "class_id": self.class_id,
+                "class_name": tax_info["name"],
+                "is_eagle": tax_info["protected"],
+                "confidence": self.confidence,
+            }
+
+        return {"detected": False}
+
+
+# ============================================================================
+
 from core.kinematics import TrajectoryKinematics
 from hardware.scada_serial import SCADAController
 from ui.dashboard import DashboardRenderer
