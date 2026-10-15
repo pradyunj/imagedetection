@@ -1,314 +1,258 @@
+"""
+Altamont Pass Project - Autonomous Raptor Detection & Turbine Curtailment
+Combines configuration, frame buffers, YOLOv8 + Hungarian/OpenCV tracking,
+4-state Kalman filter kinematics, tortuosity gate, SCADA pitch ODE, and HUD.
+"""
+
+import argparse
+import collections
+import csv
 import os
 import sys
 import time
-import csv
-import threading
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, Tuple
 
 import cv2
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 
-import config
-from core.buffer import BlockingFIFOBuffer, DropOldestRingBuffer, FramePacer, FramePacket
-from core.detector import MultiTargetDetector, TrackedTarget
-from core.kinematics import KinematicsEngine
-from hardware.scada_serial import ScadaSerialController
+# ============================================================================
+# 1. SYSTEM CONFIGURATION
+# ============================================================================
+
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+DEFAULT_FPS = 30
+DEFAULT_VIDEO_PATH = "eagle_flying.mp4"
+
+MODEL_PATH = "yolov8n.pt"
+CONFIDENCE_THRESHOLD = 0.35
+IOU_THRESHOLD = 0.30
+
+# Taxonomy Mapping
+# Class 0: Protected Golden Eagle / Bald Eagle (Triggers Curtailment)
+# Class 1: Turkey Vulture (Non-protected sympathetic raptor - Suppressed)
+# Class 2: Common Raven (Non-protected sympathetic species - Suppressed)
+# Class 3: Other Bird / Background (Suppressed)
+TAXONOMY_MAP = {
+    0: {"name": "Golden Eagle", "protected": True, "class_id": 0},
+    1: {"name": "Turkey Vulture", "protected": False, "class_id": 1},
+    2: {"name": "Common Raven", "protected": False, "class_id": 2},
+    3: {"name": "Other Bird", "protected": False, "class_id": 3},
+}
+PROTECTED_CLASS_ID = 0
+
+# Turbine Hazard Zone Geometry (in 1280x720 space)
+TURBINE_CENTER = (640, 360)
+ROTOR_RADIUS_PX = 250
+
+# Time-to-Collision (TTC) & Tortuosity Gate Thresholds
+TTC_CRITICAL_THRESHOLD_S = 15.0
+TTC_WARNING_HORIZON_S = 30.0
+TORTUOSITY_WINDOW_FRAMES = 30
+TORTUOSITY_THRESHOLD = 0.45
+
+# Wind Turbine Physical Pitch ODE Parameters
+PITCH_OPERATING_DEG = 0.0
+PITCH_FEATHERED_DEG = 90.0
+PITCH_RATE_MAX_DEG_PER_S = 8.0
+PITCH_TIME_CONSTANT_TAU = 1.5
+
+NOMINAL_RPM = 18.0
+FEATHERED_RPM = 0.5
+
+# Hardware Serial Communications
+SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_BAUDRATE = 115200
+MOCK_HARDWARE = True
+
+
+# ============================================================================
+# 2. FRAME CONCURRENCY BUFFERS & PACING
+# ============================================================================
+
+class FrameBuffer:
+    def __init__(self, capacity: int = 30, buffer_type: str = "ring"):
+        self.capacity = capacity
+        self.buffer_type = buffer_type.lower()
+        if self.buffer_type == "ring":
+            self.buffer = collections.deque(maxlen=capacity)
+        else:
+            self.buffer = collections.deque()
+
+    def put(self, frame: np.ndarray) -> None:
+        if self.buffer_type == "fifo" and len(self.buffer) >= self.capacity:
+            self.buffer.popleft()
+        self.buffer.append(frame)
+
+    def get(self) -> Optional[np.ndarray]:
+        if len(self.buffer) == 0:
+            return None
+        return self.buffer.popleft()
+
+    def __len__(self) -> int:
+        return len(self.buffer)
+
+
+class FramePacer:
+    def __init__(self, target_fps: float = 30.0):
+        self.target_fps = target_fps
+        self.frame_time = 1.0 / max(1.0, target_fps)
+        self.last_time = time.time()
+
+    def sleep(self) -> None:
+        elapsed = time.time() - self.last_time
+        sleep_dur = self.frame_time - elapsed
+        if sleep_dur > 0:
+            time.sleep(sleep_dur)
+        self.last_time = time.time()
+
+
+# ============================================================================
+
+from core.detector import RaptorDetector
+from core.kinematics import TrajectoryKinematics
+from hardware.scada_serial import SCADAController
 from ui.dashboard import DashboardRenderer
+ ============================================================================
+# 7. MAIN RUNTIME LOOP & CSV TELEMETRY LOGGER
+# ============================================================================
 
-class RaptorDefenseSystem:
-    def __init__(
-        self,
-        video_source: Any = config.DEFAULT_VIDEO_SOURCE,
-        buffer_type: str = "fifo",
-        modulo_n: int = 5,
-        tracker_type: str = "MIL",
-        mock_scada: bool = True
-    ):
-        if isinstance(video_source, str) and not os.path.exists(video_source):
-            print(f"[SYSTEM] Notice: Video asset '{video_source}' not found. Defaulting to webcam 0.")
-            self.video_source = 0
-        else:
-            self.video_source = video_source
+def parse_args():
+    parser = argparse.ArgumentParser(description="Altamont Pass Raptor Detection & Curtailment System")
+    parser.add_argument("source", nargs="?", default=DEFAULT_VIDEO_PATH, help="Video source (path, 'webcam', or index)")
+    parser.add_argument("--buffer", choices=["fifo", "ring"], default="ring", help="Concurrency frame buffer type")
+    parser.add_argument("--modulo", type=int, default=5, help="Run YOLO every Nth frame")
+    parser.add_argument("--tracker", choices=["MIL", "CSRT", "KCF", "MOSSE"], default="MIL", help="Tracker algorithm")
+    parser.add_argument("--log", default="experiments/results/telemetry_latest.csv", help="Output CSV log path")
+    parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0 = run until 'q')")
+    parser.add_argument("--headless", action="store_true", help="Disable GUI window for headless runs")
+    return parser.parse_args()
 
-        self.is_webcam = isinstance(self.video_source, int)
-        self.running = True
 
-        # Concurrency frame buffer
-        if buffer_type.lower() == "ring":
-            self.buffer = DropOldestRingBuffer(maxsize=10)
-        else:
-            self.buffer = BlockingFIFOBuffer(maxsize=10)
+def main():
+    args = parse_args()
+    source_val = 0 if args.source == "webcam" else (int(args.source) if args.source.isdigit() else args.source)
 
-        # Core scientific engines
-        model_weights = "best.pt" if os.path.exists("best.pt") else "yolov8n.pt"
-        self.detector = MultiTargetDetector(
-            model_path=model_weights,
-            modulo_n=modulo_n,
-            tracker_type=tracker_type,
-            conf_threshold=0.35
-        )
-        self.kinematics = KinematicsEngine()
-        self.scada = ScadaSerialController(mock=mock_scada)
-        self.dashboard = DashboardRenderer(
-            sidebar_width=config.SIDEBAR_WIDTH,
-            height=config.FRAME_HEIGHT
-        )
+    cap = cv2.VideoCapture(source_val)
+    if not cap.isOpened():
+        print(f"[ERROR] Could not open video source: {args.source}")
+        sys.exit(1)
 
-        self.trail: List[tuple] = []
-        os.makedirs(config.LOG_DIR, exist_ok=True)
-        os.makedirs(config.RECORDINGS_DIR, exist_ok=True)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0 or np.isnan(fps):
+        fps = DEFAULT_FPS
 
-    def producer_worker(self, cap: cv2.VideoCapture):
-        frame_idx = 0
-        while cap.isOpened() and self.running:
+    frame_buffer = FrameBuffer(capacity=30, buffer_type=args.buffer)
+    frame_pacer = FramePacer(target_fps=fps)
+    detector = RaptorDetector(modulo=args.modulo, tracker_type=args.tracker)
+    kinematics = TrajectoryKinematics(fps=fps)
+    scada = SCADAController(port=SERIAL_PORT, baudrate=SERIAL_BAUDRATE, mock=MOCK_HARDWARE)
+    dashboard = DashboardRenderer()
+    scada.connect()
+
+    os.makedirs(os.path.dirname(args.log) or ".", exist_ok=True)
+    csv_file = open(args.log, mode="w", newline="")
+    csv_writer = csv.DictWriter(csv_file, fieldnames=[
+        "frame", "timestamp", "class_name", "confidence", "cx", "cy",
+        "vx", "vy", "tortuosity", "ttc", "pitch_deg", "rpm", "curtailing"
+    ])
+    csv_writer.writeheader()
+
+    frame_index = 0
+    prevented_count = 0
+    was_curtailing = False
+
+    print(f"[INFO] Running Altamont Pass Monitor | Source: {args.source} | Modulo: {args.modulo} | Tracker: {args.tracker}")
+
+    try:
+        while True:
             ret, frame = cap.read()
             if not ret:
+                if isinstance(source_val, str) and args.source != "webcam" and args.max_frames == 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
                 break
-            packet = FramePacket(frame=frame, timestamp=time.time(), frame_index=frame_idx)
-            self.buffer.put(packet, block=(not self.is_webcam), timeout=0.2)
-            frame_idx += 1
-        self.buffer.put(None, block=False)
 
-    def draw_hazard_zone(self, frame: np.ndarray, alert_active: bool) -> np.ndarray:
-        zone_color = (0, 0, 255)
-        if alert_active and int(time.time() * 6) % 2 == 0:
-            zone_color = (0, 255, 255)
+            frame_buffer.put(frame)
+            current_frame = frame_buffer.get()
+            if current_frame is None:
+                continue
 
-        overlay = frame.copy()
-        cv2.fillPoly(overlay, [config.ZONE_POLYGON], zone_color)
-        frame = cv2.addWeighted(overlay, 0.25, frame, 0.75, 0)
-        cv2.polylines(frame, [config.ZONE_POLYGON], True, zone_color, 2)
-        return frame
+            frame_index += 1
+            dt = 1.0 / fps
 
-    def draw_overlays(
-        self,
-        frame: np.ndarray,
-        targets: List[TrackedTarget],
-        alert_active: bool
-    ) -> np.ndarray:
-        frame = self.draw_hazard_zone(frame, alert_active)
+            target_info = detector.process_frame(current_frame, frame_index)
+            threat_info = None
 
-        for target in targets:
-            x, y, w, h = target.bbox
-            if target.class_id == config.CLASS_EAGLE_PROTECTED:
-                box_color = (0, 0, 255) if alert_active else (0, 255, 0)
-            elif target.class_id == config.CLASS_SYMPATRIC_VULTURE:
-                box_color = (0, 165, 255)
-            elif target.class_id == config.CLASS_SYMPATRIC_CORVID:
-                box_color = (255, 255, 0)
+            if target_info and target_info.get("detected"):
+                is_protected = target_info.get("is_eagle", True)
+                cx, cy = target_info["cx"], target_info["cy"]
+                threat_info = kinematics.update(cx, cy, is_protected=is_protected, dt=dt)
+
+                if is_protected and threat_info["should_curtail"]:
+                    scada.command_pitch(PITCH_FEATHERED_DEG)
+                    if not was_curtailing:
+                        prevented_count += 1
+                        was_curtailing = True
+                else:
+                    scada.command_pitch(PITCH_OPERATING_DEG)
+                    was_curtailing = False
             else:
-                box_color = (200, 200, 200)
+                kinematics.reset()
+                scada.command_pitch(PITCH_OPERATING_DEG)
+                was_curtailing = False
 
-            cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
-            label = f"{target.class_name} {target.confidence:.2f}"
-            cv2.putText(
-                frame,
-                label,
-                (x, max(18, y - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                box_color,
-                2
-            )
+            scada.update_physics(dt)
+            pitch_deg = scada.get_current_pitch()
+            rpm = scada.get_current_rpm()
 
-        for i in range(1, len(self.trail)):
-            cv2.line(frame, self.trail[i - 1], self.trail[i], (0, 255, 0), 2)
+            if threat_info:
+                threat_info["pitch_deg"] = pitch_deg
+                threat_info["rpm"] = rpm
 
-        return frame
+            csv_writer.writerow({
+                "frame": frame_index,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "class_name": target_info.get("class_name", "None") if target_info else "None",
+                "confidence": round(target_info.get("confidence", 0.0), 4) if target_info else 0.0,
+                "cx": target_info.get("cx", -1) if target_info else -1,
+                "cy": target_info.get("cy", -1) if target_info else -1,
+                "vx": round(threat_info.get("vx", 0.0), 2) if threat_info else 0.0,
+                "vy": round(threat_info.get("vy", 0.0), 2) if threat_info else 0.0,
+                "tortuosity": round(threat_info.get("tortuosity", 1.0), 4) if threat_info else 1.0,
+                "ttc": round(threat_info.get("ttc", 999.0), 2) if threat_info else 999.0,
+                "pitch_deg": round(pitch_deg, 2),
+                "rpm": round(rpm, 2),
+                "curtailing": int(was_curtailing),
+            })
 
-    def visualize_trajectory(self, csv_path: str):
-        if not os.path.exists(csv_path):
-            return
-        try:
-            df = pd.read_csv(csv_path)
-            if df.empty or 'Smooth_X' not in df.columns:
-                return
-
-            df['X_Filtered'] = df['Smooth_X'].rolling(window=7, min_periods=1, center=True).mean()
-            df['Y_Filtered'] = df['Smooth_Y'].rolling(window=7, min_periods=1, center=True).mean()
-            sample_df = df.iloc[::4]
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(df['X_Filtered'], df['Y_Filtered'], color='crimson', linewidth=2.5, label='Filtered Raptor Trajectory')
-            plt.scatter(sample_df['X_Filtered'], sample_df['Y_Filtered'], color='darkred', s=20, zorder=3)
-            plt.gca().add_patch(
-                plt.Rectangle(
-                    (config.ZONE_MIN_X, config.ZONE_MIN_Y),
-                    config.ZONE_MAX_X - config.ZONE_MIN_X,
-                    config.ZONE_MAX_Y - config.ZONE_MIN_Y,
-                    color='royalblue',
-                    alpha=0.25,
-                    label='Turbine Hazard Airspace'
-                )
-            )
-
-            plt.title('Altamont Pass Autonomous Raptor Defense: Trajectory Telemetry', fontsize=12, fontweight='bold')
-            plt.xlabel('Camera X Coordinate (Pixels)', fontsize=10)
-            plt.ylabel('Camera Y Coordinate (Pixels)', fontsize=10)
-            plt.xlim(0, config.FRAME_WIDTH)
-            plt.ylim(0, config.FRAME_HEIGHT)
-            plt.gca().invert_yaxis()
-            plt.grid(True, linestyle='--', alpha=0.5)
-            plt.legend(loc='upper right')
-            plt.tight_layout()
-
-            plot_path = os.path.join(config.RECORDINGS_DIR, 'latest_trajectory_plot.png')
-            plt.savefig(plot_path, dpi=200)
-            plt.close()
-            print(f"[SYSTEM] Trajectory plot saved: {plot_path}")
-        except Exception as e:
-            print(f"[SYSTEM] Trajectory plotting notice: {e}")
-
-    def start(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cap = cv2.VideoCapture(self.video_source)
-        if not cap.isOpened():
-            print(f"[ERROR] Could not open video source: {self.video_source}")
-            return
-
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        if video_fps <= 0 or np.isnan(video_fps):
-            video_fps = 30.0
-
-        pacer = FramePacer(fps=video_fps)
-        total_width = config.FRAME_WIDTH + config.SIDEBAR_WIDTH
-
-        video_out_path = os.path.join(config.RECORDINGS_DIR, f"{timestamp}_video_processing.mp4")
-        writer = cv2.VideoWriter(
-            video_out_path,
-            cv2.VideoWriter_fourcc(*'mp4v'),
-            int(video_fps),
-            (total_width, config.FRAME_HEIGHT)
-        )
-
-        csv_path = os.path.join(config.LOG_DIR, f"{timestamp}_telemetry.csv")
-        csv_file = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow([
-            "Timestamp", "Frame_Idx", "Class_Name", "Conf",
-            "Raw_X", "Raw_Y", "Smooth_X", "Smooth_Y",
-            "VX", "VY", "Tortuosity", "TTC", "Pitch_Deg", "Rotor_RPM", "Brake_Active"
-        ])
-
-        producer_thread = threading.Thread(target=self.producer_worker, args=(cap,))
-        producer_thread.daemon = True
-        producer_thread.start()
-
-        fps_display = video_fps
-        frame_idx = 0
-        print(f"[SYSTEM] Command Center online at {video_fps:.1f} FPS native pacing. Press 'q' to quit.")
-
-        try:
-            while True:
-                packet = self.buffer.get(block=True)
-                if packet is None:
-                    break
-
-                t_start = time.time()
-                frame = cv2.resize(packet.frame, (config.FRAME_WIDTH, config.FRAME_HEIGHT))
-                frame_idx += 1
-
-                # 1. Multi-target detection and tracking pass
-                targets, tracking_mode = self.detector.update(frame, frame_idx)
-                primary = self.detector.get_primary_target()
-
-                # 2. Kinematics and physics evaluation
-                if primary is not None:
-                    raw_cx, raw_cy = primary.center
-                    self.trail.append((raw_cx, raw_cy))
-                    if len(self.trail) > config.TRAIL_MAX_POINTS:
-                        self.trail.pop(0)
-
-                    is_eagle = (primary.class_id == config.CLASS_EAGLE_PROTECTED)
-                    threat = self.kinematics.evaluate_threat(
-                        raw_cx=raw_cx,
-                        raw_cy=raw_cy,
-                        trail=self.trail,
-                        frame=frame,
-                        is_protected_eagle=is_eagle
-                    )
-                    target_info = {
-                        "detected": True,
-                        "class_name": primary.class_name,
-                        "confidence": primary.confidence,
-                        "cx": threat["smooth_x"],
-                        "cy": threat["smooth_y"],
-                        "is_eagle": is_eagle
-                    }
-                else:
-                    threat = self.kinematics.evaluate_idle(frame)
-                    target_info = None
-
-                # 3. Synchronize with hardware SCADA
-                if threat["brake_active"]:
-                    self.scada.emergency_feather()
-                else:
-                    self.scada.send_blade_pitch(threat["pitch_deg"])
-
-                # 4. Render overlays and HUD
-                frame = self.draw_overlays(frame, targets, threat["brake_active"])
-
-                t_loop = max(1e-4, time.time() - t_start)
-                instant_fps = min(video_fps, 1.0 / t_loop) if not self.is_webcam else (1.0 / t_loop)
-                fps_display = 0.90 * fps_display + 0.10 * instant_fps
-
-                dashboard = self.dashboard.render(
-                    frame=frame,
-                    fps=int(round(fps_display)),
-                    tracking_mode=tracking_mode,
+            if not args.headless:
+                output_frame = dashboard.render(
+                    current_frame,
+                    fps=int(fps),
+                    tracking_mode=f"YOLO + {args.tracker}",
                     target_info=target_info,
-                    threat_info=threat,
-                    prevented_count=self.detector.prevented_curtailments_count
+                    threat_info=threat_info,
+                    prevented_count=prevented_count,
                 )
-
-                writer.write(dashboard)
-                cv2.imshow("Altamont Pass Autonomous Raptor Defense", dashboard)
-
-                # Log telemetry
-                if primary is not None:
-                    csv_writer.writerow([
-                        datetime.now().isoformat(), frame_idx, primary.class_name, f"{primary.confidence:.2f}",
-                        raw_cx, raw_cy, threat["smooth_x"], threat["smooth_y"],
-                        f"{threat['vx']:.2f}", f"{threat['vy']:.2f}",
-                        f"{threat['tortuosity']:.3f}", f"{threat['ttc']:.2f}",
-                        f"{threat['pitch_deg']:.2f}", f"{threat['rpm']:.2f}",
-                        int(threat["brake_active"])
-                    ])
-
-                delay_ms = pacer.get_wait_key_delay(t_loop, is_live=self.is_webcam)
-                if cv2.waitKey(delay_ms) & 0xFF == ord('q'):
+                cv2.imshow("Altamont Pass Raptor Monitor", output_frame)
+                frame_pacer.sleep()
+                if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
-        finally:
-            self.running = False
-            producer_thread.join(timeout=1.5)
-            cap.release()
-            writer.release()
-            csv_file.close()
-            self.scada.close()
-            cv2.destroyAllWindows()
 
-        print("[SYSTEM] Mission complete. Generating post-flight analytics...")
-        self.visualize_trajectory(csv_path)
+            if args.max_frames > 0 and frame_index >= args.max_frames:
+                break
+
+    finally:
+        csv_file.close()
+        cap.release()
+        scada.close()
+        if not args.headless:
+            cv2.destroyAllWindows()
+        print(f"[INFO] Shutdown complete. Telemetry saved to {args.log}")
+
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Altamont Pass Autonomous Raptor Defense System")
-    parser.add_argument("source", nargs="?", default=config.DEFAULT_VIDEO_SOURCE, help="Video file or 'webcam' / 0")
-    parser.add_argument("--buffer", choices=["fifo", "ring"], default="fifo", help="Frame buffer architecture")
-    parser.add_argument("--modulo", type=int, default=5, help="Detection modulo interval N")
-    parser.add_argument("--tracker", choices=["MIL", "KCF", "CSRT", "MOSSE"], default="MIL", help="Tracker type")
-    parser.add_argument("--no-scada", action="store_true", help="Disable SCADA controller")
-    args = parser.parse_args()
+    main()
 
-    src = 0 if args.source in ["0", "webcam", "camera"] else args.source
-    system = RaptorDefenseSystem(
-        video_source=src,
-        buffer_type=args.buffer,
-        modulo_n=args.modulo,
-        tracker_type=args.tracker,
-        mock_scada=not args.no_scada
-    )
-    system.start()
