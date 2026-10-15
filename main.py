@@ -361,10 +361,153 @@ class TrajectoryKinematics:
 
 
 # ============================================================================
+# 5. HARDWARE SCADA SERIAL & BLADE PITCH ODE DYNAMICS
+# ============================================================================
 
-from hardware.scada_serial import SCADAController
-from ui.dashboard import DashboardRenderer
- ============================================================================
+class SCADAController:
+    def __init__(self, port: str = SERIAL_PORT, baudrate: int = SERIAL_BAUDRATE, mock: bool = MOCK_HARDWARE):
+        self.port = port
+        self.baudrate = baudrate
+        self.mock = mock
+        self.connected = False
+        self.current_pitch = PITCH_OPERATING_DEG
+        self.target_pitch = PITCH_OPERATING_DEG
+        self.current_rpm = NOMINAL_RPM
+
+    def connect(self) -> None:
+        if not self.mock:
+            try:
+                import serial
+                self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+                self.connected = True
+                print(f"[SCADA] Connected to serial port {self.port}")
+            except Exception as e:
+                print(f"[SCADA WARNING] Serial connection failed ({e}). Falling back to software mock.")
+                self.mock = True
+                self.connected = True
+        else:
+            self.connected = True
+            print("[SCADA] Software Mock SCADA active.")
+
+    def command_pitch(self, target_pitch_deg: float) -> None:
+        self.target_pitch = target_pitch_deg
+        if not self.mock and self.connected:
+            try:
+                self.ser.write(f"PITCH:{target_pitch_deg:.1f}\n".encode())
+            except Exception:
+                pass
+
+    def update_physics(self, dt: float) -> None:
+        err = self.target_pitch - self.current_pitch
+        if abs(err) > 1e-3:
+            rate = err / PITCH_TIME_CONSTANT_TAU
+            rate = max(-PITCH_RATE_MAX_DEG_PER_S, min(PITCH_RATE_MAX_DEG_PER_S, rate))
+            self.current_pitch += rate * dt
+            self.current_pitch = max(PITCH_OPERATING_DEG, min(PITCH_FEATHERED_DEG, self.current_pitch))
+
+        feather_fraction = (self.current_pitch - PITCH_OPERATING_DEG) / (PITCH_FEATHERED_DEG - PITCH_OPERATING_DEG)
+        target_rpm = NOMINAL_RPM - feather_fraction * (NOMINAL_RPM - FEATHERED_RPM)
+        self.current_rpm += (target_rpm - self.current_rpm) * 0.1
+
+    def get_current_pitch(self) -> float:
+        return self.current_pitch
+
+    def get_current_rpm(self) -> float:
+        return self.current_rpm
+
+    def close(self) -> None:
+        if not self.mock and hasattr(self, "ser") and self.ser.is_open:
+            self.ser.close()
+
+
+# ============================================================================
+# 6. TELEMETRY HUD DASHBOARD
+# ============================================================================
+
+class DashboardRenderer:
+    def __init__(self, sidebar_width: int = 280, height: int = FRAME_HEIGHT):
+        self.sidebar_width = sidebar_width
+        self.height = height
+
+    def render(
+        self,
+        frame: np.ndarray,
+        fps: int,
+        tracking_mode: str,
+        target_info: Optional[Dict[str, Any]],
+        threat_info: Optional[Dict[str, Any]],
+        prevented_count: int = 0,
+    ) -> np.ndarray:
+        frame_resized = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+        sidebar = np.zeros((self.height, self.sidebar_width, 3), dtype=np.uint8)
+
+        # Draw rotor hazard zone and bounding box on video canvas
+        curtailing = bool(threat_info and threat_info.get("should_curtail"))
+        zone_color = (0, 0, 255) if curtailing else (0, 180, 255)
+        cv2.circle(frame_resized, TURBINE_CENTER, ROTOR_RADIUS_PX, zone_color, 2)
+
+        if target_info and target_info.get("detected"):
+            x, y, bw, bh = target_info["bbox"]
+            box_color = (0, 0, 255) if curtailing else (0, 255, 0)
+            cv2.rectangle(frame_resized, (x, y), (x + bw, y + bh), box_color, 2)
+
+        # Sidebar HUD
+        cv2.putText(sidebar, "ALTAMONT PASS", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+        cv2.putText(sidebar, "TURBINE RESEARCH MONITOR", (18, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 160, 160), 1)
+        cv2.line(sidebar, (18, 58), (self.sidebar_width - 18, 58), (70, 70, 70), 1)
+
+        cv2.putText(sidebar, f"FPS: {fps}", (18, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+        cv2.putText(sidebar, f"MODE: {tracking_mode}", (18, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+        status_text = "SCANNING..."
+        status_color = (120, 120, 120)
+        coord_text = "X: ---  Y: ---"
+        conf_text = "CONF: N/A"
+
+        if target_info and target_info.get("detected"):
+            name = target_info.get("class_name", "Target")
+            conf = target_info.get("confidence", 0.0)
+            cx, cy = target_info.get("cx"), target_info.get("cy")
+            status_text = name.upper()
+            status_color = (0, 255, 0) if target_info.get("is_eagle", True) else (0, 200, 255)
+            coord_text = f"X: {cx}  Y: {cy}"
+            conf_text = f"CONF: {conf:.2f}"
+
+        cv2.putText(sidebar, f"TARGET: {status_text}", (18, 122), cv2.FONT_HERSHEY_SIMPLEX, 0.48, status_color, 1)
+        cv2.putText(sidebar, coord_text, (18, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (190, 190, 190), 1)
+        cv2.putText(sidebar, conf_text, (18, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (190, 190, 190), 1)
+        cv2.line(sidebar, (18, 172), (self.sidebar_width - 18, 172), (70, 70, 70), 1)
+
+        tortuosity = threat_info.get("tortuosity", 1.0) if threat_info else 1.0
+        ttc = threat_info.get("ttc", 999.0) if threat_info else 999.0
+        pitch_deg = threat_info.get("pitch_deg", PITCH_OPERATING_DEG) if threat_info else PITCH_OPERATING_DEG
+        rpm = threat_info.get("rpm", NOMINAL_RPM) if threat_info else NOMINAL_RPM
+
+        ttc_str = f"{ttc:.1f}s" if ttc < 99.0 else "> 30s"
+        ttc_color = (0, 0, 255) if ttc <= TTC_WARNING_HORIZON_S else (255, 255, 255)
+        cv2.putText(sidebar, f"TTC: {ttc_str}", (18, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.48, ttc_color, 1)
+
+        tort_color = (0, 220, 255) if tortuosity < TORTUOSITY_THRESHOLD else (255, 255, 255)
+        tort_label = f"TORTUOSITY: {tortuosity:.2f}" + (" (SOARING)" if tortuosity < TORTUOSITY_THRESHOLD else "")
+        cv2.putText(sidebar, tort_label, (18, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.42, tort_color, 1)
+        cv2.putText(sidebar, f"ROTOR RPM: {rpm:.1f}", (18, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+
+        cv2.putText(sidebar, f"BLADE PITCH: {pitch_deg:.1f} deg", (18, 255), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+        gauge_x, gauge_y, gauge_w, gauge_h = 18, 265, self.sidebar_width - 36, 10
+        cv2.rectangle(sidebar, (gauge_x, gauge_y), (gauge_x + gauge_w, gauge_y + gauge_h), (50, 50, 50), -1)
+
+        fraction = (pitch_deg - PITCH_OPERATING_DEG) / (PITCH_FEATHERED_DEG - PITCH_OPERATING_DEG)
+        fill_w = int(max(0.0, min(1.0, fraction)) * gauge_w)
+        gauge_color = (0, int(255 * (1.0 - fraction)), int(255 * fraction))
+        if fill_w > 0:
+            cv2.rectangle(sidebar, (gauge_x, gauge_y), (gauge_x + fill_w, gauge_y + gauge_h), gauge_color, -1)
+        cv2.rectangle(sidebar, (gauge_x, gauge_y), (gauge_x + gauge_w, gauge_y + gauge_h), (120, 120, 120), 1)
+
+        cv2.putText(sidebar, f"PREVENTED CURTAIL: {prevented_count}", (18, 295), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 180), 1)
+        return np.hstack((frame_resized, sidebar))
+
+
+# ============================================================================
 # 7. MAIN RUNTIME LOOP & CSV TELEMETRY LOGGER
 # ============================================================================
 
